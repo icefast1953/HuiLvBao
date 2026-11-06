@@ -24,6 +24,8 @@ class MoneyTests {
     func maximumInputStaysExact() {
         @Expect(convertAmount("999999999999999999.999999", "1", 6), "999999999999999999.999999")
         @Expect(convertAmount("0.000001", "0.5", 6), "0.000001")
+        @Expect(convertAmount(".5", "2", 2), "1.00")
+        @Expect(convertAmount("1.", "2", 2), "2.00")
     }
 
     @TestCase

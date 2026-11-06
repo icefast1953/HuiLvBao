@@ -15,6 +15,7 @@ func saveJson(path: String, value: JsonValue): Unit {
 class StateStore {
     let root: String
     let catalog: JsonArray
+    let verified = HashSet<String>()
     var favorites = ArrayList<String>(["CNY", "USD", "GBP", "EUR", "HKD"])
     var language = "zh"
     var font = "system"
@@ -26,6 +27,9 @@ class StateStore {
         this.root = root
         if (!exists(root)) { Directory.create(root, recursive: true) }
         catalog = readJson("assets/currencies.json").asArray()
+        for (code in readJson("assets/identity-bindings.json").asObject()["codes"].asArray().getItems()) {
+            verified.add(code.asString().getValue())
+        }
         if (exists(root + "/preferences.json")) {
             let saved = readJson(root + "/preferences.json").asObject()
             let restored = ArrayList<String>()

@@ -6,8 +6,12 @@ import std.fs.*
 import std.io.*
 import std.time.*
 import std.math.numeric.BigInt
+import std.sort.*
+import std.sync.*
+import std.net.TcpSocket
 import stdx.encoding.json.*
 import stdx.net.http.*
+import stdx.net.tls.*
 
 // Preserve each JSON number's decimal token before the JSON library can turn it into Float64.
 func preserveNumbers(raw: String): String {
@@ -62,6 +66,7 @@ func validDate(date: String): Bool {
 }
 
 func parseRateRows(raw: String, base: String, allowEmpty!: Bool = false): JsonArray {
+    JsonValue.fromStr(raw)
     let rows = JsonValue.fromStr(preserveNumbers(raw)).asArray()
     if (rows.size() == 0 && !allowEmpty) { throw IllegalArgumentException("NO_RATES") }
     for (item in rows.getItems()) {
@@ -91,25 +96,65 @@ func readStream(stream: InputStream, limit!: Int64 = 4000000): String {
 }
 
 func remoteGet(url: String): String {
-    let client = ClientBuilder().readTimeout(Duration.second * 20).writeTimeout(Duration.second * 20).build()
-    try {
+    let sockets = ArrayList<TcpSocket>()
+    let socketsMutex = Mutex()
+    let client = ClientBuilder().tlsConfig(TlsClientConfig()).readTimeout(Duration.second * 20).writeTimeout(Duration.second * 20)
+        .connector({address =>
+            let socket = TcpSocket(address)
+            synchronized(socketsMutex) { sockets.add(socket) }
+            socket.connect(timeout: Duration.second * 10)
+            socket
+        }).build()
+    let task = spawn {
         let response = client.get(url)
         try {
             if (response.status != 200) { throw Exception("HTTP_ERROR") }
-            return readStream(response.body)
+            readStream(response.body)
         } finally { response.close() }
-    } finally { client.close() }
+    }
+    try {
+        return task.get(Duration.second * 35)
+    } finally {
+        task.cancel()
+        synchronized(socketsMutex) { for (socket in sockets) { socket.close() } }
+        client.close()
+    }
+}
+
+class PendingRequest {
+    let id: Int64
+    let future: Future<JsonObject>
+    init(id: Int64, future: Future<JsonObject>) { this.id = id; this.future = future }
 }
 
 class RateStore {
     let state: StateStore
     let fetch: (String) -> String
-    let verified = HashSet<String>()
+    let verified: HashSet<String>
+    let jobsMutex = Mutex()
+    let jobs = HashMap<String, PendingRequest>()
+    var nextJob: Int64 = 0
 
     init(state: StateStore, fetch: (String) -> String) {
         this.state = state; this.fetch = fetch
-        for (code in readJson("assets/identity-bindings.json").asObject()["codes"].asArray().getItems()) {
-            verified.add(code.asString().getValue())
+        verified = state.verified
+    }
+
+    func singleFlight(key: String, work: () -> JsonObject): JsonObject {
+        let pending = synchronized(jobsMutex) {
+            if (let Some(existing) <- jobs.get(key)) { existing }
+            else {
+                nextJob++
+                let created = PendingRequest(nextJob, spawn { work() })
+                jobs[key] = created
+                created
+            }
+        }
+        try { return JsonValue.fromStr(pending.future.get().toJsonString()).asObject() }
+        finally {
+            synchronized(jobsMutex) {
+                if (let Some(current) <- jobs.get(key)) { if (current.id == pending.id) { jobs.remove(key) } }
+            }
         }
     }
 
@@ -119,18 +164,44 @@ class RateStore {
         let path = state.root + "/latest-" + base + ".json"
         var snapshot = JsonObject()
         if (exists(path)) { snapshot = readJson(path).asObject() }
+        if (snapshot.containsKey("rows")) {
+            let valid = JsonArray()
+            for (item in snapshot["rows"].asArray().getItems()) {
+                if (verified.contains(textField(item.asObject(), "quote"))) { valid.add(item) }
+            }
+            snapshot.put("rows", valid)
+        }
         snapshot.put("cached", JsonBool(true)); snapshot.put("error", JsonString(""))
         if (!refresh && snapshot.containsKey("rows")) { return snapshot }
+        let cached = snapshot
+        return singleFlight("latest-" + base, { => fetchLatest(base, path, cached) })
+    }
+
+    func fetchLatest(base: String, path: String, snapshot: JsonObject): JsonObject {
         try {
             let rows = parseRateRows(fetch("https://api.frankfurter.dev/v2/rates?base=" + base), base)
             let seen = HashSet<String>()
-            for (item in rows.getItems()) {
-                let code = textField(item.asObject(), "quote")
-                if (!seen.add(code)) { throw IllegalArgumentException("DUPLICATE_RATE") }
+            let merged = HashMap<String, JsonValue>()
+            if (snapshot.containsKey("rows")) {
+                for (item in snapshot["rows"].asArray().getItems()) { merged[textField(item.asObject(), "quote")] = item }
             }
+            let fetchedAt = DateTime.nowUTC().toString()
+            for (item in rows.getItems()) {
+                let row = item.asObject()
+                let code = textField(row, "quote")
+                if (!seen.add(code)) { throw IllegalArgumentException("DUPLICATE_RATE") }
+                if (!verified.contains(code)) { continue }
+                if (let Some(previous) <- merged.get(code)) {
+                    if (textField(previous.asObject(), "date") > textField(row, "date")) { continue }
+                }
+                row.put("fetchedAt", JsonString(fetchedAt)); merged[code] = row
+            }
+            let retained = ArrayList<JsonValue>()
+            for ((_, row) in merged) { retained.add(row) }
+            sort(retained, key: {row => textField(row.asObject(), "quote")})
             let fresh = JsonObject()
-            fresh.put("base", JsonString(base)); fresh.put("rows", rows)
-            fresh.put("fetchedAt", JsonString(DateTime.nowUTC().toString()))
+            fresh.put("base", JsonString(base)); fresh.put("rows", JsonArray(retained))
+            fresh.put("fetchedAt", JsonString(fetchedAt))
             fresh.put("cached", JsonBool(false)); fresh.put("error", JsonString(""))
             saveJson(path, fresh)
             return fresh
