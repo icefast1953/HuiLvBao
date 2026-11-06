@@ -1,0 +1,10 @@
+target/
+.local/
+.tools/
+.superpowers/
+*.log
+*.exe
+*.dll
+*.zip
+local.env.ps1
+
