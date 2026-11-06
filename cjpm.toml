@@ -13,3 +13,6 @@
   package-configuration = {}
 
 [dependencies]
+
+[target.x86_64-w64-mingw32.bin-dependencies]
+  path-option = ["${STDX_HOME}/dynamic/stdx"]
