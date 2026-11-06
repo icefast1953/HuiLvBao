@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 $repoRoot=Split-Path -Parent $PSScriptRoot
 if(Test-Path -LiteralPath (Join-Path $repoRoot 'local.env.ps1')){ . (Join-Path $repoRoot 'local.env.ps1') }
 if(-not $env:CANGJIE_HOME){ $env:CANGJIE_HOME=Join-Path (Split-Path -Parent $repoRoot) 'cangjie-rebuild\nightly\cangjie' }
